@@ -214,7 +214,7 @@
         </div>
         <div class="field-group full">
           <label>Driver Name</label>
-          <input type="text" id="driverName" placeholder="Full name" />
+          <select id="driverName"><option value="">Select your name</option></select>
         </div>
         <div class="field-group">
           <label>Vehicle Unit #</label>
@@ -567,9 +567,9 @@
   function submitForm() {
     const name = document.getElementById("driverName").value.trim();
     const date = document.getElementById("date").value;
-    if (!name) { alert("Please enter driver name before saving."); return; }
+    if (!name) { alert("Please pick your name before saving."); return; }
     if (!date)  { alert("Please enter the date before saving."); return; }
-    sendPdf({ title: "Montney Projects Corp \u2013 Pre-Trip Inspection", who: document.getElementById("driverName").value.trim(), date: date, extra: { Unit: document.getElementById("unitNum").value.trim(), "Defects noted": String(document.querySelectorAll(".pf-btn.fail.active").length) } });
+    sendPdf({ title: "Montney Projects Corp \u2013 Pre-Trip Inspection", who: document.getElementById("driverName").value.trim(), date: date, extra: { Unit: document.getElementById("unitNum").value.trim(), "Defects noted": String(document.querySelectorAll(".pf-btn.fail.active").length) }, track: trackInfo("Pre-Trip", "driverName", date) });
   }
 </script>
 
@@ -1059,7 +1059,7 @@ async function sendPdf(o) {
     say("Sending to the office...", "busy");
     var fields = { Form: o.title, "Submitted by": o.who, Date: o.date }; Object.keys(o.extra || {}).forEach(function (kk) { fields[kk] = o.extra[kk]; });
     await postPdf(blob, lastName, o.title + " – " + o.who + " – " + o.date, fields);
-    say("Sent to the office. You're done.", "ok"); btn.textContent = "SENT"; document.getElementById("copyBtn").hidden = false;
+    say("Sent to the office. You're done.", "ok"); if (o.track) logForm(o.track); btn.textContent = "SENT"; document.getElementById("copyBtn").hidden = false;
   } catch (e) {
     btn.disabled = false; btn.style.opacity = ""; btn.textContent = label;
     document.getElementById("sendBox").scrollIntoView({ block: "center" });
@@ -1074,6 +1074,75 @@ function saveCopy() {
   if (navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: lastName.replace(/\.pdf$/, "") }).catch(function () {}); return; }
   var a = document.createElement("a"); a.href = URL.createObjectURL(lastPdf); a.download = lastName; document.body.appendChild(a); a.click(); a.remove();
 }
+</script>
+<script>
+// ---- Portal tracking: records who sent this form and when, for the employee portal calendar.
+// The email to the office is sent exactly as before; this only adds a record. If there's no signal,
+// the record waits on this phone and goes out the next time the form is opened.
+var TRACK_URL = "https://nwcbvchcdsbwwnnbtyht.supabase.co/rest/v1/";
+var TRACK_KEY = "sb_publishable_JtICuOehqdwzQOm8v0i-SA_qf21Bh0e"; // public key, safe to be here
+var CREW_FALLBACK = [["aydan", "Aydan Mockford"], ["josh", "Josh Chays"], ["karma", "Karma Cairns"], ["mason", "Mason Rempel"], ["mike", "Mike Chapates"], ["nathan", "Nathan Peck"]];
+
+function trackStore(k, v) { try { if (v === undefined) return JSON.parse(localStorage.getItem(k) || "null"); localStorage.setItem(k, JSON.stringify(v)); } catch (e) { return null; } }
+
+function fillCrew(sel, list) {
+  var keep = sel.value, last = trackStore("montney_me");
+  while (sel.options.length > 1) sel.remove(1);
+  list.forEach(function (c) { var o = document.createElement("option"); o.value = c[1]; o.textContent = c[1]; o.setAttribute("data-crew", c[0]); sel.appendChild(o); });
+  sel.value = keep || last || "";
+  if (sel.selectedIndex < 0) sel.value = "";
+}
+
+function loadCrew(sel) {
+  fillCrew(sel, trackStore("montney_crew") || CREW_FALLBACK);
+  fetch(TRACK_URL + "crew?select=crew_name,display_name&active=eq.true&order=display_name", { headers: { apikey: TRACK_KEY } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (rows) {
+      if (!rows || !rows.length) return;
+      var list = rows.map(function (r) { return [r.crew_name, r.display_name]; });
+      trackStore("montney_crew", list); fillCrew(sel, list);
+    }).catch(function () {});
+  sel.addEventListener("change", function () { trackStore("montney_me", sel.value); });
+}
+
+function trackInfo(form, selId, date) {
+  var sel = document.getElementById(selId), opt = sel.options[sel.selectedIndex];
+  var val = function (id) { var n = document.getElementById(id); return n ? n.value.trim().slice(0, 120) : ""; };
+  return { work_date: date, crew_name: opt ? opt.getAttribute("data-crew") : "", form: form, site: val("site"), client: val("client") };
+}
+
+function sendTrack(rec) {
+  return fetch(TRACK_URL + "safety_forms", {
+    method: "POST", keepalive: true,
+    headers: { apikey: TRACK_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+    body: JSON.stringify(rec)
+  }).then(function (r) {
+    if (r.ok) return true;
+    return r.status >= 500 ? false : true; // a rejected record (e.g. a very old date) won't succeed on retry, so drop it
+  }).catch(function () { return false; });
+}
+
+function logForm(rec) {
+  if (!rec || !rec.crew_name) return;
+  var q = trackStore("montney_pending") || []; q.push(rec); trackStore("montney_pending", q);
+  flushTrack();
+}
+
+function flushTrack() {
+  if (window.self !== window.top) return; // the hidden "sent" confirmation copy of this page
+  var q = trackStore("montney_pending") || [];
+  if (!q.length) return;
+  Promise.all(q.map(sendTrack)).then(function (ok) {
+    var now = trackStore("montney_pending") || [];
+    var left = q.filter(function (_, i) { return !ok[i]; });
+    trackStore("montney_pending", left.concat(now.slice(q.length)));
+  });
+}
+
+window.addEventListener("load", flushTrack);
+window.addEventListener("online", flushTrack);
+
+loadCrew(document.getElementById("driverName"));
 </script>
 </body>
 </html>
